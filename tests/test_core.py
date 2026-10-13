@@ -454,25 +454,45 @@ class CoreTests(unittest.TestCase):
         self.assertIn("trace_image_relationships", review["data"]["checks"])
         self.assertTrue(review["data"]["release_allowed"])
 
-    def test_adapter_requirement_mapping_fills_only_undeclared_entries(self):
-        # 教学 fixture 的 trace 不带 requirement_ids；适配器必须按生产装配的
-        # 同一条规则（tender_brief 的 in_personnel_scope）补齐，且已声明值不覆盖。
+    def test_adapter_mapping_fills_only_absent_keys(self):
+        # 第三轮评审：补齐的唯一条件是 key 完全不存在。key 已存在时，无论值是
+        # null、字符串、数字、空数组还是合法列表，一律原样保留交生产审查。
         adapter = load_m14_adapter()
         output, values = self.generate()
-        trace = copy.deepcopy(values["M13"]["data"]["trace"])
-        for entry in trace:
-            del entry["requirement_ids"]
-        kept = trace[0]["person_id"]
-        trace[0]["requirement_ids"] = ["REQ-KEEP"]
+        in_scope = [r["requirement_id"] for r in values["M04"]["data"]["requirements"] if r.get("in_personnel_scope")]
+        for label, declared in (("null", None), ("string", "REQ-FAKE"), ("number", 42),
+                                ("empty_list", []), ("valid_list", list(in_scope))):
+            trace = [{"person_id": "PERSON-01", "requirement_ids": declared},
+                     {"person_id": "PERSON-02"}]
+            filled = adapter.attach_requirement_mapping(trace, values["M04"])
+            self.assertEqual(filled, ["PERSON-02"], "%s：只有缺 key 的条目才补齐" % label)
+            self.assertEqual(trace[0]["requirement_ids"], declared, "%s：已声明的值绝不被覆盖" % label)
+            self.assertEqual(trace[1]["requirement_ids"], in_scope, "%s：缺 key 的条目按生产规则补齐" % label)
+        self.assertTrue(in_scope, "样例应有 in_personnel_scope 为真的要求")
 
-        filled = adapter.attach_requirement_mapping(trace, values["M04"])
-        expected = [r["requirement_id"] for r in values["M04"]["data"]["requirements"] if r.get("in_personnel_scope")]
-        self.assertNotIn(kept, filled, "已声明 requirement_ids 的条目不得被补齐")
-        self.assertEqual(trace[0]["requirement_ids"], ["REQ-KEEP"], "已声明的值绝不覆盖")
-        self.assertEqual(filled, [e["person_id"] for e in trace[1:]])
-        for entry in trace[1:]:
-            self.assertEqual(entry["requirement_ids"], expected)
-        self.assertTrue(expected, "样例应有 in_personnel_scope 为真的要求")
+    def test_declared_invalid_mapping_is_not_laundered_into_a_pass(self):
+        # 第三轮评审的复现锁：null/字符串/数字曾被适配器洗成全量清单从而放行。
+        # 经适配器后，这些值必须以原面目到达生产门禁并各自被对应 issue 打回。
+        adapter = load_m14_adapter()
+        output, values = self.generate()
+        ctx = load_context(self.source, "TEST")
+        for label, declared, expect_code in (("null", None, "TRACE_REQUIREMENT_UNDECLARED"),
+                                             ("string", "REQ-FAKE", "TRACE_REQUIREMENT_UNDECLARED"),
+                                             ("number", 42, "TRACE_REQUIREMENT_UNDECLARED"),
+                                             ("empty_list", [], "RESPONSE_TRACE_MISSING")):
+            assembled = copy.deepcopy(values["M13"])
+            for entry in assembled["data"]["trace"]:
+                entry.pop("requirement_ids", None)
+            victim = assembled["data"]["trace"][0]["person_id"]
+            assembled["data"]["trace"][0]["requirement_ids"] = declared
+            filled = adapter.attach_requirement_mapping(assembled["data"]["trace"], values["M04"])
+            self.assertNotIn(victim, filled, "%s：已声明的条目不得进补齐名单" % label)
+            self.assertEqual(assembled["data"]["trace"][0]["requirement_ids"], declared,
+                             "%s：值必须原样到达生产审查" % label)
+            review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+            codes = {i["code"] for i in review["issues"]}
+            self.assertIn(expect_code, codes, "%s 必须被生产门禁打回" % label)
+            self.assertFalse(review["data"]["release_allowed"], "%s 不得放行" % label)
 
     def test_mapped_trace_passes_the_undeclared_gate_like_the_normal_case(self):
         # 正常专项用例的完整路径：fixture 裸 trace 先被门禁打回，适配器按上游

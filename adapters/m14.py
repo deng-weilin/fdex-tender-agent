@@ -62,13 +62,16 @@ def attach_requirement_mapping(trace, brief):
     `tender_brief` 中 `in_personnel_scope` 为真的全部要求。这里用同一份登记输入、
     同一条规则还原 M13→M14 交接时应有的内容，不是凭空构造覆盖。
 
-    只补"完全没有声明"的条目；已声明的值绝不覆盖，声明错了仍会被生产审查的
-    wanted/actual 比对抓出来。
+    仅在 key 完全不存在时补齐。只要 key 已存在——哪怕值是 null、字符串、数字或
+    空数组——一律原样交给生产审查：适配层不替生产门禁"修正"声明，非法值必须以
+    它本来的面目到达 wanted/actual 比对，该 REVIEW 就 REVIEW、该阻断就阻断。
+    （第三轮评审：此前按 isinstance(..., list) 判断，null/字符串/数字会被覆盖成
+    全量清单，非法声明被洗成正常通过。）
     """
     in_scope = [r["requirement_id"] for r in brief["data"]["requirements"] if r.get("in_personnel_scope")]
     filled = []
     for entry in trace:
-        if isinstance(entry.get("requirement_ids"), list):
+        if "requirement_ids" in entry:
             continue
         entry["requirement_ids"] = list(in_scope)
         filled.append(entry.get("person_id"))
