@@ -174,6 +174,18 @@ def image_sequence(document):
     return hashes
 
 
+def declared_artifact_paths(value, keys=()):
+    """Walk path declarations, including nested groups and lists."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from declared_artifact_paths(child, keys + (key,))
+    elif isinstance(value, list):
+        for child in value:
+            yield from declared_artifact_paths(child, keys)
+    else:
+        yield keys, value
+
+
 def check_artifacts(manifest, result, result_path):
     spec = manifest["artifacts"]
     if not spec:
@@ -184,10 +196,25 @@ def check_artifacts(manifest, result, result_path):
         return ["artifacts must be an object"]
     kind = spec["kind"]
     errors = []
-    if kind == "no_docx":
-        return ["A blocked/unconfirmed case produced DOCX"] if list(directory.rglob("*.docx")) else []
-    if kind == "no_zip":
-        return ["Nonpublic case produced a public ZIP"] if list(directory.rglob("*.zip")) else []
+    if kind in ("no_docx", "no_zip"):
+        suffix, role, message = ((".docx", "document", "A blocked/unconfirmed case produced DOCX")
+                                 if kind == "no_docx" else
+                                 (".zip", "archive", "Nonpublic case produced a public ZIP"))
+        # Inspect actual filenames independently of OS glob case sensitivity.
+        prohibited = any(p.is_file() and p.suffix.casefold() == suffix for p in directory.rglob("*"))
+        for keys, relative in declared_artifact_paths(artifacts):
+            try:
+                path = contained(directory, relative)
+            except ValueError as exc:
+                errors.append("Invalid artifact declaration: " + str(exc))
+                continue
+            # A declared document/archive is forbidden even with a disguised
+            # extension or before it is written. Also catch aliases by suffix.
+            if role in keys or Path(relative).suffix.casefold() == suffix or path.suffix.casefold() == suffix:
+                prohibited = True
+        if prohibited:
+            errors.append(message)
+        return errors
     if kind == "personnel_docx":
         path = contained(directory, artifacts.get("document"))
         doc = Document(path)

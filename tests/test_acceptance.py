@@ -220,6 +220,69 @@ class AcceptanceTests(unittest.TestCase):
         shutil.copy2(ROOT / "templates/personnel-v1.docx", self.root / "unconfirmed.docx")
         self.assertTrue(any("produced DOCX" in e for e in self.check(manifest, result)))
 
+    def prohibited_artifact_cases(self):
+        return (("M13", "review", "document", ".docx", "produced DOCX"),
+                ("M18", "abnormal", "archive", ".zip", "public ZIP"))
+
+    def put_prohibited_artifact(self, path, suffix):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if suffix == ".docx":
+            shutil.copy2(ROOT / "templates/personnel-v1.docx", path)
+        else:
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("synthetic.txt", "Public synthetic regression fixture")
+
+    def test_prohibited_artifact_suffixes_are_case_insensitive(self):
+        for module, case, key, suffix, message in self.prohibited_artifact_cases():
+            for index, extension in enumerate((suffix, suffix.upper(), suffix.title())):
+                with self.subTest(module=module, extension=extension):
+                    directory = self.root / f"{module}-{index}"; directory.mkdir()
+                    manifest = self.manifest(module, case)
+                    result = self.oracle_projection(manifest)
+                    self.put_prohibited_artifact(directory / "nested" / ("output" + extension), suffix)
+                    self.assertTrue(any(message in e for e in harness.check_artifacts(manifest, result, directory / "result.json")))
+
+    def test_prohibited_artifact_declarations_are_checked_without_file(self):
+        for module, case, key, suffix, message in self.prohibited_artifact_cases():
+            for artifacts in ({key: "output.bin"}, {"extra": {"files": ["missing" + suffix.upper()]}},
+                              {"extra": {key: "missing.bin"}}):
+                with self.subTest(module=module, artifacts=artifacts):
+                    manifest = self.manifest(module, case)
+                    result = self.oracle_projection(manifest); result["artifacts"] = artifacts
+                    self.assertTrue(any(message in e for e in harness.check_artifacts(manifest, result, self.root / "result.json")))
+
+    def test_prohibited_artifact_declarations_reject_invalid_paths(self):
+        for module, case, key, suffix, message in self.prohibited_artifact_cases():
+            manifest = self.manifest(module, case)
+            for path in ("../outside.json", str(self.root / "outside.json"), None, 12):
+                with self.subTest(module=module, path=path):
+                    result = self.oracle_projection(manifest); result["artifacts"] = {"summary": path}
+                    self.assertTrue(self.check(manifest, result))
+            result = self.oracle_projection(manifest); result["artifacts"] = {"summary": "summary.json"}
+            write(self.root / "summary.json", {"status": "BLOCKED"})
+            self.assertEqual(self.check(manifest, result), [])
+
+    def test_check_cli_rejects_prohibited_files_and_declarations(self):
+        for module, case, key, suffix, message in self.prohibited_artifact_cases():
+            for index, variant in enumerate((suffix, suffix.upper(), suffix.title(), "declared-role", "declared-suffix")):
+                with self.subTest(module=module, variant=variant):
+                    directory = self.root / f"{module}-{index}"; directory.mkdir()
+                    manifest = self.manifest(module, case); result = self.oracle_projection(manifest)
+                    if variant == "declared-role":
+                        result["artifacts"] = {key: "missing.bin"}
+                    elif variant == "declared-suffix":
+                        result["artifacts"] = {"extra": {"files": ["missing" + suffix.upper()]}}
+                    else:
+                        self.put_prohibited_artifact(directory / "nested" / ("output" + variant), suffix)
+                    write(directory / "result.json", result)
+                    process = subprocess.run([sys.executable, str(ROOT / "tools/task_acceptance.py"), "check",
+                                              "--module", module, "--case", case, "--result", str(directory / "result.json")],
+                                             cwd=ROOT, capture_output=True, text=True)
+                    self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+                    value = json.loads(process.stdout)
+                    self.assertFalse(value["passed"])
+                    self.assertTrue(any(message in e for e in value["errors"]))
+
     def test_zip_extra_file_and_changed_bytes_fail(self):
         manifest = self.manifest("M18"); result = self.oracle_projection(manifest)
         self.add_test_artifacts(manifest, result, self.root)
