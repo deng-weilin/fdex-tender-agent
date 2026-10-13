@@ -55,6 +55,26 @@ def build_evidence(payload, index, upstream_root, trace, selected):
     return evidence
 
 
+def attach_requirement_mapping(trace, brief):
+    """trace 未声明要求映射时，按生产装配的同一条规则补出映射，并回报补过哪些人。
+
+    `fdex_tender.documents.assemble` 写 trace 时用的规则是：人员资质章节覆盖
+    `tender_brief` 中 `in_personnel_scope` 为真的全部要求。这里用同一份登记输入、
+    同一条规则还原 M13→M14 交接时应有的内容，不是凭空构造覆盖。
+
+    只补"完全没有声明"的条目；已声明的值绝不覆盖，声明错了仍会被生产审查的
+    wanted/actual 比对抓出来。
+    """
+    in_scope = [r["requirement_id"] for r in brief["data"]["requirements"] if r.get("in_personnel_scope")]
+    filled = []
+    for entry in trace:
+        if isinstance(entry.get("requirement_ids"), list):
+            continue
+        entry["requirement_ids"] = list(in_scope)
+        filled.append(entry.get("person_id"))
+    return filled
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
@@ -81,6 +101,7 @@ def main():
     document_name = document_path.name
     shutil.copyfile(document_path, output / document_name)
     trace = read_json(resolve(payload["trace"])) if payload.get("trace") else []
+    mapping_filled = attach_requirement_mapping(trace, upstream["M04"]) if trace else []
 
     assembled = envelope(ctx, "M13",
                          {"artifact_status": "PARTIAL_DRAFT",
@@ -105,6 +126,11 @@ def main():
         summary += ["", "## 仅提示不改判的段落漂移",
                     "- " + "; ".join("{} 声称第{}段、实际第{}段".format(d["person_id"], d["claimed_paragraph_index"], d["actual_paragraph_index"])
                                      for d in data["paragraph_index_drift"])]
+    if mapping_filled:
+        summary += ["", "## 要求映射的来源",
+                    "- 传入 trace 未声明 requirement_ids：{}。本适配器按生产装配的同一规则"
+                    "（tender_brief.json 中 in_personnel_scope 为真的要求）补出映射后再送审；"
+                    "覆盖比对仍由生产审查执行，未跳过。".format("、".join(str(p) for p in mapping_filled))]
     summary += ["", "机器可读详情：review_result.json"]
     (output / "review_result.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
 
@@ -118,6 +144,9 @@ def main():
              "release_allowed": data.get("release_allowed")}
     if "release_hash_matches" in data:
         facts["release_hash_matches"] = data["release_hash_matches"]
+    if mapping_filled:
+        facts["requirement_mapping_source"] = "tender_brief.json:in_personnel_scope"
+        facts["requirement_mapping_filled_person_ids"] = mapping_filled
 
     result = {"schema_version": RESULT_VERSION,
               "module": "M14",

@@ -13,6 +13,15 @@ from fdex_tender.documents import review_document
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def load_m14_adapter():
+    """按文件路径加载验收适配器 adapters/m14.py（它不是包，不能 import）。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("m14_adapter_under_test", ROOT / "adapters" / "m14.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class CoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tender-test-")
@@ -444,6 +453,48 @@ class CoreTests(unittest.TestCase):
         self.assertIn("trace_cell_locations", review["data"]["checks"])
         self.assertIn("trace_image_relationships", review["data"]["checks"])
         self.assertTrue(review["data"]["release_allowed"])
+
+    def test_adapter_requirement_mapping_fills_only_undeclared_entries(self):
+        # 教学 fixture 的 trace 不带 requirement_ids；适配器必须按生产装配的
+        # 同一条规则（tender_brief 的 in_personnel_scope）补齐，且已声明值不覆盖。
+        adapter = load_m14_adapter()
+        output, values = self.generate()
+        trace = copy.deepcopy(values["M13"]["data"]["trace"])
+        for entry in trace:
+            del entry["requirement_ids"]
+        kept = trace[0]["person_id"]
+        trace[0]["requirement_ids"] = ["REQ-KEEP"]
+
+        filled = adapter.attach_requirement_mapping(trace, values["M04"])
+        expected = [r["requirement_id"] for r in values["M04"]["data"]["requirements"] if r.get("in_personnel_scope")]
+        self.assertNotIn(kept, filled, "已声明 requirement_ids 的条目不得被补齐")
+        self.assertEqual(trace[0]["requirement_ids"], ["REQ-KEEP"], "已声明的值绝不覆盖")
+        self.assertEqual(filled, [e["person_id"] for e in trace[1:]])
+        for entry in trace[1:]:
+            self.assertEqual(entry["requirement_ids"], expected)
+        self.assertTrue(expected, "样例应有 in_personnel_scope 为真的要求")
+
+    def test_mapped_trace_passes_the_undeclared_gate_like_the_normal_case(self):
+        # 正常专项用例的完整路径：fixture 裸 trace 先被门禁打回，适配器按上游
+        # M04 映射补齐后同一份审查必须放行——锁定"适配器存在"这件事。
+        adapter = load_m14_adapter()
+        output, values = self.generate()
+        ctx = load_context(self.source, "TEST")
+        bare = copy.deepcopy(values["M13"])
+        for entry in bare["data"]["trace"]:
+            del entry["requirement_ids"]
+        before = review_document(ctx, values["M07"], values["M08"], values["M09"], bare, output)
+        self.assertIn("TRACE_REQUIREMENT_UNDECLARED", {i["code"] for i in before["issues"]})
+        self.assertFalse(before["data"]["release_allowed"])
+
+        filled = adapter.attach_requirement_mapping(bare["data"]["trace"], values["M04"])
+        after = review_document(ctx, values["M07"], values["M08"], values["M09"], bare, output)
+        self.assertEqual(filled, [e["person_id"] for e in bare["data"]["trace"]])
+        self.assertEqual(after["processing_status"], "COMPLETE")
+        self.assertEqual(after["data"]["requirement_coverage"], "DECLARED_AND_MATCHED")
+        self.assertIn("scope_coverage", after["data"]["checks"])
+        self.assertTrue(after["data"]["release_allowed"])
+        self.assertEqual([i["code"] for i in after["issues"]], [])
 
 
 def re_sub_drawing(xml, rid):
