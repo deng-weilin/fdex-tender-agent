@@ -137,6 +137,15 @@ git switch -c task/你的任务编号-简短名称
 python -m unittest discover -s tests -v
 ```
 
+**每项开放任务都有专项测试包，不能只跑上面的基座测试。** 阅读 [测试指南](docs/testing.md) 和 [自己任务的操作卡](samples/acceptance/README.md)。例如报价任务：
+
+```bash
+python tools/task_acceptance.py verify-kit --module M12
+python tools/task_acceptance.py run --module M12 --adapter adapters/m12.py --output outputs/m12-test-01
+```
+
+适配器由认领者接入自己的实现。第一条只检查测试材料完整性，第二条才验证新增功能；原文、图片、新模板、实际Word错误与明确预期都在仓库内。初始 v0.1.0 Release ZIP 不包含这批后补测试，请以最新仓库或任务 Issue 指向的精确提交为准。
+
 5. 提交到自己的 fork，向上游 main 发 PR。正文单独一行写 `Closes #任务号`，按模板补齐实际证据。
 6. 阅读 CI 和审查意见，在同一 PR 修订；新提交需要重新审核。
 
@@ -178,6 +187,9 @@ Codex 用于构建和测试交付物；WorkBuddy 用于让最终使用者调用 
 | `src/fdex_tender/` | 可运行参考实现 |
 | `samples/e2e/` | 正常、未确认、过期、缺图、换人原始输入 |
 | `samples/modules/` | 模块的规划输入与扩展挑战 |
+| `samples/acceptance/` | 11项开放任务的专项原件、正常/复核/异常/变更用例、预期与哈希 |
+| `docs/testing.md` | 安装、自测、适配器接口、实际文件检查及PR证据 |
+| `adapters/` | 学员接入本任务实现的测试适配器位置 |
 | `templates/` | 声明支持的 Word 模板 |
 | `skills/` | 四个核心 Skill |
 | `tests/` | 业务与协作回归测试 |
