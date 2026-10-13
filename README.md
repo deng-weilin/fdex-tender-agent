@@ -94,7 +94,9 @@ python -m fdex_tender validate outputs/my-review/review_result.json
 
 到 [Issues](https://github.com/iurp/fdex-tender-agent/issues) 筛选 `task:ready`。`task:backlog` 是尚未开放或有依赖的任务。
 
-任务正文会写：当前已有能力、你要增加什么、输入路径、接口、验收编号、正常/复核/异常样例和未包含范围。
+任务正文先解释：你在帮谁解决什么问题、我们给你什么材料、具体做哪些工作、交付效果是什么以及怎么测试。术语、文件名、接口和运行命令放在最后的技术附录。每项都有本任务的业务例子，不需要先读懂所有模块才能认领一个边界清楚的任务。
+
+`task:backlog` 的任务会明确标出还没配齐的资料。它们是后续计划，不要求学员先自备客户文件，也不能把规划说明当作已完成的练习包。
 
 - 入门任务可直接 `/claim`。
 - 常规任务先读懂相关模块再认领。

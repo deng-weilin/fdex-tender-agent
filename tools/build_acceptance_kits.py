@@ -351,15 +351,10 @@ def write_cards():
         card += ["", "## 直接执行", "", "先验证自己拿到的是完整数据包：", "", "```bash", f"python tools/task_acceptance.py verify-kit --module {module}", "```", "", "开发适配器读取 input.json，调用自己的模块并输出 result.json；结果投影与适配器接口见 docs/testing.md。不需要改生产接口或安装新服务。", "", "```bash", f"python tools/task_acceptance.py run --module {module} --adapter adapters/{module.lower()}.py --output outputs/{module.lower()}-test-01", "```", "", "没有实现适配器时命令会明确失败，不能把verify-kit通过当成功能通过。正常/需复核/异常分支都由检查器判定，不以进程退出0代替业务结果。", "", "已有实际输出也可单例检查：", "", "```bash", f"python tools/task_acceptance.py check --module {module} --case normal --result outputs/my-run/result.json", "```", "", "## PR 必交", "", "运行命令、整套report.json、正常与异常实际输出、新增回归测试、至少一次实际上游文件联调、接口影响和未完成范围。Word任务还交实际DOCX及逐页视觉检查；OCR交像素区域证据和引擎/模型执行记录。", "", "固定输入通过不保证泛化：复审会改变项目、人物、数值或文件顺序。不得复制参考预期冒充实现。代码合并不是业务批准。", ""]
         (KIT / module / "README.md").write_text("\n".join(card), encoding="utf-8")
         lines.append(f"| {module} | {len(entries)} | [{module}](./{module}/README.md) |")
-        path = ROOT / f"docs/tasks/{module}.md"
-        body = path.read_text()
-        old = "基础输入 samples/e2e/core-normal；REVIEW 输入 samples/e2e/unconfirmed；异常输入 samples/e2e/expired 或 missing-image；变化输入 samples/e2e/replacement。先运行整链取得实际上游文件，再修改相关模块。"
-        body = body.replace(old, f"基座联调用 samples/e2e/core-normal。**本任务专项测试以 [操作卡](../../samples/acceptance/{module}/README.md) 为准**，包含独立的正常、复核、异常与变化原始输入及预期；不能用基座未确认/过期样例代替新增能力验收。")
-        if "## 专项测试命令" not in body:
-            body += f"\n## 专项测试命令\n\n```bash\npython tools/task_acceptance.py verify-kit --module {module}\npython tools/task_acceptance.py run --module {module} --adapter adapters/{module.lower()}.py --output outputs/{module.lower()}-test-01\n```\n\n适配器由本任务开发者实现；无需服务账号即可读取全部合成输入。verify-kit只验证材料完整性，不代表功能已完成。验收结果与独立审查分别记录。\n"
-        path.write_text(body, encoding="utf-8")
     (KIT / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     write(KIT / "index.json", {"schema_version": "bid-training.acceptance-index.v1", "kit_version": "1.0", "modules": list(tasks), "cases": INDEX})
+    from task_descriptions import write_documents
+    write_documents()
 
 
 def main():

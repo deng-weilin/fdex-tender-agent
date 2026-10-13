@@ -30,10 +30,13 @@ def main():
         if item["state"] != "OPEN" or not item["title"].startswith(f"[{module}]"):
             raise ValueError("Issue context drifted: " + number)
         body = item["body"]
+        if "<!-- tender-task-description:v2 -->" in body:
+            print("FRIENDLY_DESCRIPTION_PRESENT", number, module, "Use sync_task_descriptions to update versioned links; no legacy appendix appended.", flush=True)
+            continue
         block = f"""{START}
 ## 本任务专项测试交接
 
-专项测试已补齐，请以本节及操作卡为准，**旧正文中的共用未确认/过期样例只用于基座联调，不替代本任务增量验收**。
+本任务的练习原件、正确结果和异常情况见下面的操作卡。按正文中的业务步骤实现，再用这些用例检查；基座的共用例子只用来了解已有功能，不能代替本任务自测。
 
 - [本任务操作卡](https://github.com/{REPO}/blob/{args.ref}/samples/acceptance/{module}/README.md)：正常、需复核、异常与变更原始输入，明确预期、实际文件检查及命令。
 - [统一测试指南](https://github.com/{REPO}/blob/{args.ref}/docs/testing.md)：适配器接口、Windows命令与PR证据。
