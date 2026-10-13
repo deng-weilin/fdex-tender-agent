@@ -218,6 +218,69 @@ class CoreTests(unittest.TestCase):
         values = run(unpacked / "inputs", self.base / "replay")
         self.assertEqual(values["M14"]["processing_status"], "COMPLETE")
 
+    def test_trace_records_actual_cell_and_relationship_locations(self):
+        output, values = self.generate()
+        from docx import Document
+        from docx.oxml.ns import qn
+        doc = Document(output / "personnel-chapter.docx")
+        selected = {p["person_id"]: p for p in values["M09"]["data"]["selected"]}
+        for entry in values["M13"]["data"]["trace"]:
+            person = selected[entry["person_id"]]
+            row = doc.tables[entry["table_index"]].rows[entry["row_index"]]
+            self.assertIn(person["name"], row.cells[entry["name_column"]].text)
+            self.assertIn(person["certificate_id"], row.cells[entry["certificate_column"]].text)
+            blips = list(doc.paragraphs[entry["paragraph_index"]]._element.iter(qn("a:blip")))
+            self.assertEqual(blips[0].get(qn("r:embed")), entry["relationship_id"])
+
+    def test_swapped_images_are_located_even_when_media_set_is_unchanged(self):
+        output, values = self.generate()
+        from docx import Document
+        from docx.oxml.ns import qn
+        path = output / "personnel-chapter.docx"
+        doc = Document(path)
+        blips = list(doc.element.body.iter(qn("a:blip")))
+        first, second = blips[0].get(qn("r:embed")), blips[1].get(qn("r:embed"))
+        blips[0].set(qn("r:embed"), second)
+        blips[1].set(qn("r:embed"), first)
+        doc.save(path)
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output)
+        codes = {i["code"] for i in review["issues"]}
+        self.assertIn("ATTACHMENT_PERSON_MISMATCH", codes)
+        self.assertIn("image_relationship", review["data"]["located_issue_kinds"])
+        self.assertTrue(any(m["kind"] == "image_relationship" for m in review["data"]["location_mismatches"]))
+
+    def test_trace_pointing_to_wrong_cell_is_located(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        assembled["data"]["trace"][0]["name_column"] = 2
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertIn("TRACE_CELL_MISMATCH", {i["code"] for i in review["issues"]})
+        mismatch = next(m for m in review["data"]["location_mismatches"] if m["kind"] == "table_cell")
+        self.assertEqual((mismatch["table_index"], mismatch["row_index"], mismatch["column_index"]), (0, 1, 2))
+
+    def test_missing_trace_cannot_claim_location_review(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        assembled["data"]["trace"] = []
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertEqual(review["processing_status"], "REVIEW")
+        self.assertIn("TRACE_LOCATION_MISSING", {i["code"] for i in review["issues"]})
+
+    def test_changed_document_invalidates_released_hash(self):
+        output, values = self.generate()
+        record = release(output, "DEMO reviewer")
+        from docx import Document
+        doc = Document(output / "personnel-chapter.docx")
+        doc.paragraphs[0].add_run("（本地改写）")
+        doc.save(output / "personnel-chapter.docx")
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output, release=record)
+        self.assertFalse(review["data"]["release_hash_matches"])
+        self.assertIn("RELEASE_STALE", {i["code"] for i in review["issues"]})
+
 
 def re_sub_drawing(xml, rid):
     from lxml import etree
