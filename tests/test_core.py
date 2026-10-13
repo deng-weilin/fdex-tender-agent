@@ -329,6 +329,122 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(located["paragraph_index"])
         self.assertGreater(located["searched_paragraphs"], 0)
 
+    # --- trace 声明完整性：缺字段/缺人/坐标非法不得放行，完整声明不得误杀 ---
+    # 对应 Issue #14 v2 与维护者复审意见：覆盖门禁与位置检查必须由生产代码
+    # 自己把守，教学 trace 缺字段不能成为跳过的理由。
+
+    def test_complete_requirement_mapping_still_passes(self):
+        output, values = self.generate()
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output)
+        self.assertEqual(review["data"]["requirement_coverage"], "DECLARED_AND_MATCHED")
+        self.assertIn("scope_coverage", review["data"]["checks"])
+        self.assertTrue(review["data"]["release_allowed"])
+
+    def test_single_trace_entry_without_requirement_ids_cannot_pass(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        del assembled["data"]["trace"][0]["requirement_ids"]
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        codes = {i["code"] for i in review["issues"]}
+        self.assertIn("TRACE_REQUIREMENT_UNDECLARED", codes)
+        self.assertEqual(review["data"]["requirement_coverage"], "NOT_DECLARED_IN_TRACE")
+        self.assertIn(assembled["data"]["trace"][0]["person_id"],
+                      review["data"]["requirement_undeclared_person_ids"])
+        self.assertFalse(review["data"]["release_allowed"])
+        self.assertNotIn("scope_coverage", review["data"]["checks"])
+
+    def test_all_trace_entries_without_requirement_ids_cannot_pass(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        for entry in assembled["data"]["trace"]:
+            del entry["requirement_ids"]
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertIn("TRACE_REQUIREMENT_UNDECLARED", {i["code"] for i in review["issues"]})
+        self.assertFalse(review["data"]["release_allowed"])
+        self.assertNotIn("scope_coverage", review["data"]["checks"])
+
+    def test_empty_requirement_list_cannot_hide_behind_set_comparison(self):
+        # 每人的 requirement_ids 是同一份全量清单，只比集合时清空某一条，
+        # 并集不变、wanted==actual 仍成立——必须逐条挡住空数组。
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        victim = assembled["data"]["trace"][0]["person_id"]
+        assembled["data"]["trace"][0]["requirement_ids"] = []
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertIn("RESPONSE_TRACE_MISSING", {i["code"] for i in review["issues"]})
+        self.assertIn(victim, review["data"]["requirement_empty_declared_person_ids"])
+        self.assertFalse(review["data"]["release_allowed"])
+
+    def test_dropping_one_persons_trace_cannot_claim_location_review(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        dropped = assembled["data"]["trace"].pop()["person_id"]
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        codes = {i["code"] for i in review["issues"]}
+        self.assertIn("TRACE_PERSON_MISSING", codes)
+        self.assertFalse(review["data"]["trace_location_checked"])
+        self.assertFalse(review["data"]["release_allowed"])
+        self.assertNotIn("trace_cell_locations", review["data"]["checks"])
+        self.assertTrue(any(m["person_id"] == dropped for m in review["data"]["trace_integrity"]))
+
+    def test_duplicated_person_trace_is_reported(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        assembled["data"]["trace"].append(copy.deepcopy(assembled["data"]["trace"][-1]))
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertIn("TRACE_PERSON_DUPLICATED", {i["code"] for i in review["issues"]})
+        self.assertFalse(review["data"]["trace_location_checked"])
+        self.assertFalse(review["data"]["release_allowed"])
+
+    def test_missing_relationship_field_blocks_release(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        del assembled["data"]["trace"][0]["relationship_id"]
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertIn("TRACE_RELATION_UNDECLARED", {i["code"] for i in review["issues"]})
+        self.assertFalse(review["data"]["trace_location_checked"])
+        self.assertFalse(review["data"]["release_allowed"])
+
+    def test_missing_location_field_blocks_release(self):
+        output, values = self.generate()
+        assembled = copy.deepcopy(values["M13"])
+        del assembled["data"]["trace"][0]["paragraph_index"]
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+        self.assertIn("TRACE_LOCATION_UNDECLARED", {i["code"] for i in review["issues"]})
+        self.assertFalse(review["data"]["trace_location_checked"])
+        self.assertFalse(review["data"]["release_allowed"])
+
+    def test_negative_and_bool_coordinates_are_rejected(self):
+        # bool 是 int 的子类，tables[True] 等价于 tables[1]；负数会静默取到
+        # 末尾几行——两者都能让"指错位置"看起来像"指对了"。
+        output, values = self.generate()
+        ctx = load_context(self.source, "TEST")
+        for field, bad in (("row_index", -1), ("table_index", True)):
+            assembled = copy.deepcopy(values["M13"])
+            assembled["data"]["trace"][0][field] = bad
+            review = review_document(ctx, values["M07"], values["M08"], values["M09"], assembled, output)
+            self.assertIn("TRACE_COORDINATE_INVALID", {i["code"] for i in review["issues"]},
+                          "%s=%r 应被判坐标非法" % (field, bad))
+            self.assertFalse(review["data"]["trace_location_checked"])
+            self.assertFalse(review["data"]["release_allowed"])
+
+    def test_complete_trace_still_claims_location_review(self):
+        output, values = self.generate()
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output)
+        self.assertTrue(review["data"]["trace_location_checked"])
+        self.assertIn("trace_cell_locations", review["data"]["checks"])
+        self.assertIn("trace_image_relationships", review["data"]["checks"])
+        self.assertTrue(review["data"]["release_allowed"])
+
 
 def re_sub_drawing(xml, rid):
     from lxml import etree

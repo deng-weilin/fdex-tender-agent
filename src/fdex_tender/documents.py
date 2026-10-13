@@ -47,6 +47,79 @@ def _first_differing_cell(actual_rows, expected_rows):
     return {"table_index": 0, "row_index": None, "column_index": None}
 
 
+TRACE_LOCATION_FIELDS = ("table_index", "row_index", "name_column", "certificate_column", "paragraph_index")
+TRACE_RELATION_FIELDS = ("relationship_id", "image_sha256")
+
+
+def _coordinate_is_valid(value):
+    """坐标只接受非负整数。
+
+    `bool` 是 `int` 的子类，`document.tables[True]` 等价于 `tables[1]`，负数
+    会静默取到末尾几行——两者都能让"指错位置"看起来像"指对了"，因此必须单独挡掉。
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _verify_trace_integrity(selected, trace):
+    """核对 trace 是否真的给每个入选人员留下了完整、唯一、可核对的位置声明。
+
+    只要有一处不完整就不再允许宣称"位置已检查"：缺人、重复、缺必要定位/关系
+    字段、坐标非法，各自单独报告。此前的写法用 `trace_by_person.get(id, {})`
+    把"没有记录"变成了"空记录"，后续 `is not None` 判断全部静默跳过，等于删掉
+    一条 trace 就能绕过全部位置校验。
+    """
+    findings = []
+    grouped = {}
+    for entry in trace:
+        grouped.setdefault(entry.get("person_id"), []).append(entry)
+    selected_ids = [person["person_id"] for person in selected]
+    for person_id in selected_ids:
+        entries = grouped.get(person_id, [])
+        if not entries:
+            findings.append((issue("TRACE_PERSON_MISSING", person_id,
+                                   "trace 没有登记该入选人员，其表格单元格与附件关系无法核对",
+                                   severity="MAJOR", owner="文档负责人",
+                                   action="补齐该人员的 trace 记录后重新审查"),
+                             {"person_id": person_id, "kind": "trace_integrity",
+                              "detail": "入选人员在 trace 中缺失"}))
+            continue
+        if len(entries) > 1:
+            findings.append((issue("TRACE_PERSON_DUPLICATED", person_id,
+                                   "同一入选人员出现多条 trace 记录，位置声明不唯一",
+                                   owner="文档负责人", action="删除重复记录后重新审查"),
+                             {"person_id": person_id, "kind": "trace_integrity",
+                              "detail": "同一人员 trace 记录多于一条", "count": len(entries)}))
+            continue
+        entry = entries[0]
+        missing_location = [field for field in TRACE_LOCATION_FIELDS if entry.get(field) is None]
+        if missing_location:
+            findings.append((issue("TRACE_LOCATION_UNDECLARED", person_id,
+                                   "trace 缺少必要的定位字段，无法核对该人员的位置声明",
+                                   severity="MAJOR", owner="文档负责人",
+                                   action="补齐定位字段后重新审查"),
+                             {"person_id": person_id, "kind": "trace_integrity",
+                              "detail": "缺少定位字段", "missing_fields": missing_location}))
+        missing_relation = [field for field in TRACE_RELATION_FIELDS if entry.get(field) is None]
+        if missing_relation:
+            findings.append((issue("TRACE_RELATION_UNDECLARED", person_id,
+                                   "trace 缺少图片关系字段，附件归属无法核对",
+                                   severity="MAJOR", owner="文档负责人",
+                                   action="补齐图片关系字段后重新审查"),
+                             {"person_id": person_id, "kind": "trace_integrity",
+                              "detail": "缺少图片关系字段", "missing_fields": missing_relation}))
+        invalid = [field for field in TRACE_LOCATION_FIELDS
+                   if entry.get(field) is not None and not _coordinate_is_valid(entry.get(field))]
+        if invalid:
+            findings.append((issue("TRACE_COORDINATE_INVALID", person_id,
+                                   "trace 的定位坐标不是非负整数，按索引取值会指向错误位置",
+                                   owner="文档负责人", action="修正坐标为非负整数后重新审查"),
+                             {"person_id": person_id, "kind": "trace_integrity",
+                              "detail": "坐标不是非负整数", "invalid_fields": invalid,
+                              "values": {field: entry.get(field) for field in invalid}}))
+    unknown = [person_id for person_id in grouped if person_id not in set(selected_ids)]
+    return findings, not findings and not unknown, unknown
+
+
 def _person_image_blocks(document, anchors):
     """把可见图片按证书编号锚定归属到人。
 
@@ -89,14 +162,17 @@ def _verify_table_locations(document, index, selected, trace):
                              {"person_id": entry.get("person_id"), "kind": "table_cell", "detail": "trace 中的人员不在本次确认范围"}))
             continue
         asset = assets.get(person["asset_id"], {})
+        if not all(_coordinate_is_valid(entry.get(field)) for field in ("table_index", "row_index")):
+            continue       # 坐标缺失或非法已由完整性校验单独报告，此处不再按索引取值
         for column_key, expected, label in (("name_column", person["name"], "姓名"),
                                             ("certificate_column", asset.get("certificate_id"), "证书编号")):
             column = entry.get(column_key)
             cell = None
-            try:
-                cell = document.tables[entry["table_index"]].rows[entry["row_index"]].cells[column]
-            except (IndexError, KeyError, TypeError):
-                cell = None
+            if _coordinate_is_valid(column):
+                try:
+                    cell = document.tables[entry["table_index"]].rows[entry["row_index"]].cells[column]
+                except (IndexError, KeyError, TypeError):
+                    cell = None
             if expected is None or cell is None or expected not in cell.text:
                 findings.append((issue("TRACE_CELL_MISMATCH", f"{person['person_id']}-{label}",
                                        f"trace 声称{label}位于表格{entry.get('table_index')}第{entry.get('row_index')}行第{column}列，实际内容不符",
@@ -117,13 +193,15 @@ def _verify_image_relationships(document, index, selected, trace):
         if asset and asset.get("certificate_id"):
             anchors[asset["certificate_id"]] = person["person_id"]
     blocks, unanchored = _person_image_blocks(document, anchors)
+    # 缺记录的入选人员由 _verify_trace_integrity 单独报告；这里只比对真实存在的
+    # 声明，绝不把"没有记录"当成"记录为空"从而静默跳过比对。
     trace_by_person = {e.get("person_id"): e for e in trace}
     findings, drift = [], []
     for person in selected:
         asset = assets.get(person["asset_id"], {})
         expected = asset.get("sha256")
         shown = blocks.get(person["person_id"], [])
-        entry = trace_by_person.get(person["person_id"], {})
+        entry = trace_by_person.get(person["person_id"]) or {}
         if not shown:
             findings.append((issue("ATTACHMENT_MISSING", person["person_id"], "实际Word中该人员的证书附件区没有可见图片", owner="文档负责人"),
                              {"person_id": person["person_id"], "kind": "image_relationship",
@@ -289,22 +367,44 @@ def review_document(ctx, matrix, index, matched, assembled, run_dir, release=Non
                                  **(residue or {"paragraph_index": None})})
     trace = assembled["data"].get("trace") or []
     drift, unanchored = [], None
+    trace_integrity, trace_location_checked, unknown_persons = [], False, []
+    coverage_performed = False
     if not trace:
         record(issue("TRACE_LOCATION_MISSING", "trace", "装配未提供位置记录，不能声称表格单元格与附件关系已定位检查", severity="MAJOR", owner="文档负责人"))
     else:
+        trace_integrity, trace_location_checked, unknown_persons = _verify_trace_integrity(selected, trace)
+        for problem, mismatch in trace_integrity:
+            problems.append(problem)     # 不带定位种类：这是"能不能检查"的结论，不是一处具体位置
         for problem, mismatch in _verify_table_locations(doc, index, selected, trace):
             record(problem, "table_cell", mismatch)
         image_findings, drift, unanchored = _verify_image_relationships(doc, index, selected, trace)
         for problem, mismatch in image_findings:
             record(problem, "image_relationship", mismatch)
-        if all("requirement_ids" in entry for entry in trace):
+        if len([entry for entry in trace if isinstance(entry.get("requirement_ids"), list)]) == len(trace):
             rows = matrix["data"]["responses"]
             wanted = {rid for row in rows for rid in row["requirement_ids"]}
-            actual = {rid for row in trace for rid in row.get("requirement_ids", [])}
-            if wanted != actual:
+            actual = {rid for row in trace for rid in row["requirement_ids"]}
+            coverage_performed = True
+            # 集合之外还要逐条看：每个人的 requirement_ids 是同一份全量清单，
+            # 只比集合时清空某一条，并集不变、wanted==actual 仍成立，这次清空
+            # 就不可观测。空数组等于该条声明"我什么都没覆盖"，有要求要覆盖时
+            # 必须判映射缺失，不能靠其他条目替它圆场。
+            empty_declared = [entry.get("person_id") for entry in trace
+                              if isinstance(entry.get("requirement_ids"), list) and not entry["requirement_ids"]]
+            if wanted != actual or (wanted and empty_declared):
+                result["requirement_empty_declared_person_ids"] = empty_declared
                 problems.append(issue("RESPONSE_TRACE_MISSING", "trace", "声明范围内要求到实际输出的映射缺失"))
+            else:
+                result["requirement_coverage"] = "DECLARED_AND_MATCHED"
         else:
+            undeclared = [entry.get("person_id") for entry in trace
+                          if not isinstance(entry.get("requirement_ids"), list)]
             result["requirement_coverage"] = "NOT_DECLARED_IN_TRACE"
+            result["requirement_undeclared_person_ids"] = undeclared
+            problems.append(issue("TRACE_REQUIREMENT_UNDECLARED", "trace",
+                                  "trace 未声明要求到输出的映射，覆盖门禁无法执行，不能据此放行",
+                                  severity="MAJOR", owner="文档负责人",
+                                  action="接入有依据的上游要求映射或补齐 trace 的 requirement_ids 后重新审查"))
     inspected = result["file_sha256"]
     release_hash_matches = None
     if release:
@@ -312,12 +412,18 @@ def review_document(ctx, matrix, index, matched, assembled, run_dir, release=Non
         if release.get("status") == "RELEASED" and not release_hash_matches:
             record(issue("RELEASE_STALE", "release", "实际Word与已放行版本不一致，旧放行失效，需重新审查后再放行", owner="招投标负责人"))
     checks.extend(["actual_docx_opened", "project_fields", "selected_table", "embedded_image_hashes", "no_unselected_person",
-                   "no_placeholder", "scope_coverage", "trace_cell_locations", "trace_image_relationships"])
+                   "no_placeholder"])
+    if coverage_performed:
+        checks.append("scope_coverage")          # 只有真的跑过比对才写进清单
+    if trace_location_checked:
+        checks.extend(["trace_cell_locations", "trace_image_relationships"])
     location_mismatches = [m for kind in ("table_cell", "image_relationship", "paragraph") for m in located.get(kind, [])]
     result.update({"location_mismatches": location_mismatches,
                    "located_issue_kinds": [kind for kind in ("table_cell", "image_relationship", "paragraph") if located.get(kind)],
                    "inspected_document_sha256": inspected,
-                   "trace_location_checked": bool(trace),
+                   "trace_location_checked": trace_location_checked,
+                   "trace_integrity": [mismatch for _, mismatch in trace_integrity],
+                   "trace_unknown_person_ids": unknown_persons,
                    "paragraph_index_drift": drift,
                    "unanchored_images": unanchored,
                    "release_allowed": not problems and matched["data"]["confirmation"]["status"] == "CONFIRMED"})
