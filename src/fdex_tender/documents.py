@@ -14,6 +14,39 @@ def _picture_relationship(shape):
     return blip.get(qn("r:embed"))
 
 
+def _locate_text(document, paragraph_texts, needle):
+    """在正文段落与表格单元格里定位一段文字，返回机器可核对的位置。
+
+    只写 kind=paragraph 等于没给位置：报告里要能直接指出第几段，或第几张表、
+    第几行、第几列。找不到时返回空字典，由调用方显式写 paragraph_index=None，
+    不假装有位置。
+    """
+    for paragraph_index, text in enumerate(paragraph_texts):
+        if needle in text:
+            return {"paragraph_index": paragraph_index, "found_in": "paragraph"}
+    for table_index, table in enumerate(document.tables):
+        for row_index, row in enumerate(table.rows):
+            for column_index, cell in enumerate(row.cells):
+                if needle in cell.text:
+                    return {"table_index": table_index, "row_index": row_index,
+                            "column_index": column_index, "found_in": "table_cell"}
+    return {}
+
+
+def _first_differing_cell(actual_rows, expected_rows):
+    """给出人员表第一处不一致的单元格坐标（行号按 Word 实际行计，表头为第 0 行）。"""
+    for row_index in range(max(len(actual_rows), len(expected_rows))):
+        actual = actual_rows[row_index] if row_index < len(actual_rows) else []
+        expected = expected_rows[row_index] if row_index < len(expected_rows) else []
+        for column_index in range(max(len(actual), len(expected))):
+            actual_value = actual[column_index] if column_index < len(actual) else None
+            expected_value = expected[column_index] if column_index < len(expected) else None
+            if actual_value != expected_value:
+                return {"table_index": 0, "row_index": row_index + 1, "column_index": column_index,
+                        "expected": expected_value, "actual": actual_value}
+    return {"table_index": 0, "row_index": None, "column_index": None}
+
+
 def _person_image_blocks(document, anchors):
     """把可见图片按证书编号锚定归属到人。
 
@@ -217,14 +250,20 @@ def review_document(ctx, matrix, index, matched, assembled, run_dir, release=Non
     except (OSError, ValueError, KeyError, zipfile.BadZipFile):
         return envelope(ctx, "M14", result, assembled["input_refs"], [issue("DOCX_UNREADABLE", "document", "实际Word包损坏或关联图片丢失")])
     text = "\n".join([p.text for p in doc.paragraphs] + [c.text for t in doc.tables for row in t.rows for c in row.cells])
+    paragraph_texts = [p.text for p in doc.paragraphs]
+    searched_cells = sum(len(row.cells) for table in doc.tables for row in table.rows)
     for field, value in (("project_name", ctx["project_name"]), ("project_id", ctx["project_id"]), ("lot_id", ctx["lot_id"])):
         if value not in text:
             record(issue("PROJECT_FIELDS_WRONG", "document.title", f"实际文档未包含{field}对应内容"),
-                   "paragraph", {"kind": "paragraph", "field": field, "expected": value, "detail": "实际文档缺少该项目字段"})
+                   "paragraph", {"kind": "paragraph", "field": field, "expected": value, "detail": "实际文档缺少该项目字段",
+                                 "searched_paragraphs": len(paragraph_texts), "searched_table_cells": searched_cells,
+                                 "paragraph_index": None})
     placeholder = re.search(r"\{\{[^{}]+\}\}|\[TODO[^\]]*\]", text)
     if placeholder:
+        token = placeholder.group(0)
         record(issue("PLACEHOLDER_REMAINS", "document", "实际文档仍含未处理占位符"),
-               "paragraph", {"kind": "paragraph", "quote": placeholder.group(0), "detail": "未处理占位符仍留在实际Word中"})
+               "paragraph", {"kind": "paragraph", "quote": token, "detail": "未处理占位符仍留在实际Word中",
+                             **(_locate_text(doc, paragraph_texts, token) or {"paragraph_index": None})})
     assets = {a["asset_id"]: a for a in index["data"]["assets"]}
     selected = matched["data"]["selected"]
     table_rows = [[c.text for c in row.cells] for row in doc.tables[0].rows[1:]] if len(doc.tables) == 1 else []
@@ -232,7 +271,8 @@ def review_document(ctx, matrix, index, matched, assembled, run_dir, release=Non
     if table_rows != expected_rows:
         record(issue("PERSON_TABLE_WRONG", "PERSONNEL-TABLE", "实际人员表与确认记录不一致，可能包含旧人员或错证书"),
                "table_cell", {"kind": "table_cell", "detail": "实际人员表与确认记录不一致",
-                              "actual_rows": table_rows, "expected_rows": expected_rows})
+                              "actual_rows": table_rows, "expected_rows": expected_rows,
+                              **_first_differing_cell(table_rows, expected_rows)})
     expected_media = {assets[p["asset_id"]]["sha256"] for p in selected}
     if media != expected_media:
         problems.append(issue("ATTACHMENT_SET_WRONG", "PERSONNEL-ATTACHMENTS", "实际图片缺失、错配或包含旧版本图片"))
@@ -240,8 +280,13 @@ def review_document(ctx, matrix, index, matched, assembled, run_dir, release=Non
     for person in unselected:
         old_assets = [a for a in index["data"]["assets"] if a["person_id"] == person["person_id"]]
         if person["name"] in text or any(a["certificate_id"] in text or a["sha256"] in media for a in old_assets):
+            residue = next((located_text
+                            for needle in [person["name"]] + [a["certificate_id"] for a in old_assets]
+                            for located_text in [_locate_text(doc, paragraph_texts, needle)] if located_text), {})
             record(issue("UNSELECTED_PERSON_REMAINS", person["person_id"], "未选人员的姓名、编号或图片残留"),
-                   "paragraph", {"kind": "paragraph", "person_id": person["person_id"], "detail": "未选人员信息残留在实际Word中"})
+                   "paragraph", {"kind": "paragraph", "person_id": person["person_id"],
+                                 "detail": "未选人员信息残留在实际Word中",
+                                 **(residue or {"paragraph_index": None})})
     trace = assembled["data"].get("trace") or []
     drift, unanchored = [], None
     if not trace:

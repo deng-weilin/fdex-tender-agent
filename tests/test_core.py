@@ -281,6 +281,54 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(review["data"]["release_hash_matches"])
         self.assertIn("RELEASE_STALE", {i["code"] for i in review["issues"]})
 
+    def test_placeholder_reports_the_exact_paragraph(self):
+        output, values = self.generate()
+        from docx import Document
+        path = output / "personnel-chapter.docx"
+        doc = Document(path)
+        doc.paragraphs[0].text = "{{UNFILLED}}"
+        doc.save(path)
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output)
+        self.assertIn("PLACEHOLDER_REMAINS", {i["code"] for i in review["issues"]})
+        located = next(m for m in review["data"]["location_mismatches"]
+                       if m["kind"] == "paragraph" and m.get("quote") == "{{UNFILLED}}")
+        self.assertEqual(located["paragraph_index"], 0)
+        self.assertEqual(located["found_in"], "paragraph")
+
+    def test_person_table_mismatch_reports_the_differing_cell(self):
+        output, values = self.generate()
+        from docx import Document
+        path = output / "personnel-chapter.docx"
+        doc = Document(path)
+        doc.tables[0].rows[1].cells[1].text = "未选用旧人员"
+        doc.save(path)
+        ctx = load_context(self.source, "TEST")
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output)
+        self.assertIn("PERSON_TABLE_WRONG", {i["code"] for i in review["issues"]})
+        located = next(m for m in review["data"]["location_mismatches"]
+                       if m["kind"] == "table_cell" and m.get("field") is None and m.get("expected"))
+        self.assertEqual((located["table_index"], located["row_index"], located["column_index"]), (0, 1, 1))
+        self.assertEqual(located["actual"], "未选用旧人员")
+
+    def test_missing_project_field_declares_the_scan_scope(self):
+        output, values = self.generate()
+        from docx import Document
+        ctx = load_context(self.source, "TEST")
+        path = output / "personnel-chapter.docx"
+        doc = Document(path)
+        body = [p for p in doc.paragraphs if ctx["project_name"] in p.text]
+        self.assertTrue(body, "样例应有一处写入项目名")
+        for paragraph in body:
+            paragraph.text = ""
+        doc.save(path)
+        review = review_document(ctx, values["M07"], values["M08"], values["M09"], values["M13"], output)
+        self.assertIn("PROJECT_FIELDS_WRONG", {i["code"] for i in review["issues"]})
+        located = next(m for m in review["data"]["location_mismatches"]
+                       if m["kind"] == "paragraph" and m.get("field") == "project_name")
+        self.assertIsNone(located["paragraph_index"])
+        self.assertGreater(located["searched_paragraphs"], 0)
+
 
 def re_sub_drawing(xml, rid):
     from lxml import etree
