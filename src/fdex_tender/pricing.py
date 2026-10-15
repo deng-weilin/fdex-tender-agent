@@ -19,8 +19,11 @@
 - 舍入规则只支持任务要求的 ROUND_HALF_UP；其它任何声明 → ROUNDING_RULE_UNSUPPORTED，
   **绝不静默降级**；digits 必须是非负整数，否则 ROUNDING_DIGITS_INVALID。
 - 非法 ceiling / declared_total 绝不当作"未提供"而跳过校验 → CEILING_INVALID / DECLARED_TOTAL_INVALID。
-- 批准必须"四证齐备"才 CURRENT：status==APPROVED、摘要绑定 previous_lines[0]、
-  scope 显式覆盖全部当前报价行、当前 lines 与 previous_lines 一致；否则 INVALID/STALE。
+- 批准只支持**单组报价**：一条摘要只能绑定一条基线，多组独立报价时后续行的"变更前
+  基线"可被同步篡改而不被发现，因此明确不支持（APPROVAL_MULTI_LINE_UNSUPPORTED），
+  既不假装 CURRENT，也不用 scope 掩盖。单组必须"四证齐备"才 CURRENT：
+  status==APPROVED、摘要绑定 previous_lines[0]、scope 覆盖该行、当前行与 previous 一致；
+  否则 INVALID/STALE。
 
 本模块只做计算与状态判定，不读 expected.json、不自行定价、不真实审批、不生成 Word。
 对外输出字典符合 bid-training.acceptance-result.v1（不含 input_hashes/evidence，那些由适配器补）。
@@ -48,7 +51,7 @@ _BLOCKING = {
     "ROUNDING_DIGITS_INVALID",
 }
 # 待核对类问题（无阻断项时出现 → status=REVIEW）：规则缺口/批准状态需人判。
-_REVIEW = {"TAX_RULE_MISSING", "APPROVAL_STALE", "APPROVAL_INVALID"}
+_REVIEW = {"TAX_RULE_MISSING", "APPROVAL_STALE", "APPROVAL_INVALID", "APPROVAL_MULTI_LINE_UNSUPPORTED"}
 
 _VALID_MODES = ("exclusive", "inclusive")
 
@@ -195,12 +198,21 @@ def _approval_status(payload):
     只有"四证齐备"才 CURRENT：明示 APPROVED + 摘要绑定 previous_lines[0] +
     scope 显式覆盖全部当前行 + 当前 lines 与 previous_lines 一致。
     任何一项不满足都不得标成 CURRENT（未批准/被驳回/范围不符/内容漂移）。
+
+    多组独立报价（lines 或 previous_lines 不止一条）**不支持批准**：一条摘要只能
+    绑定一条基线，否则后续行的"变更前基线"可被同步篡改（改 lines[i] 也改
+    previous_lines[i]）而不被发现，令未获批准的新价冒充 CURRENT。故明确返回不支持，
+    既不假装 CURRENT，也不用 scope 掩盖第二行未被覆盖。
     """
     approval = payload.get("approval")
     previous = payload.get("previous_lines") or []
     lines = payload.get("lines", []) or []
     if not approval:
         return None, []
+
+    # 0) 单条摘要只能可靠绑定单条报价基线；多组报价 / 多条基线 → 明确不支持批准。
+    if len(lines) != 1 or len(previous) > 1:
+        return "INVALID", ["APPROVAL_MULTI_LINE_UNSUPPORTED"]
 
     # 1) 批准状态必须明示 APPROVED；REJECTED/PENDING/未知一律不得 CURRENT。
     if approval.get("status") != "APPROVED":
